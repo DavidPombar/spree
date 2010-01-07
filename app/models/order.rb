@@ -7,7 +7,7 @@ class Order < ActiveRecord::Base
 
   before_create :generate_token
   before_save :update_line_items, :update_totals
-  after_create :create_checkout_and_shippment, :create_tax_charge
+  after_create :create_checkout, :create_shipment, :create_tax_charge
 
   belongs_to :user
   has_many :state_events, :as => :stateful
@@ -20,6 +20,7 @@ class Order < ActiveRecord::Base
 
   has_one :checkout
   has_one :bill_address, :through => :checkout
+  has_one :ship_address, :through => :checkout
   has_many :shipments, :dependent => :destroy
 
   has_many :adjustments,      :extend => Totaling, :order => :position
@@ -35,8 +36,7 @@ class Order < ActiveRecord::Base
   accepts_nested_attributes_for :line_items
   accepts_nested_attributes_for :shipments
 
-  def ship_address; shipment.address; end
-  delegate :shipping_method, :to =>:shipment
+  delegate :shipping_method, :to => :checkout
   delegate :email, :to => :checkout
   delegate :ip_address, :to => :checkout
   delegate :special_instructions, :to => :checkout
@@ -69,7 +69,9 @@ class Order < ActiveRecord::Base
     after_transition :to => 'canceled', :do => :cancel_order
     after_transition :to => 'returned', :do => :restock_inventory
     after_transition :to => 'resumed', :do => :restore_state
+    after_transition :to => 'paid', :do => :make_shipments_ready
     after_transition :to => 'shipped', :do => :make_shipments_shipped
+    after_transition :to => 'balance_due', :do => :make_shipments_pending
 
     event :complete do
       transition :to => 'new', :from => 'in_progress'
@@ -108,6 +110,16 @@ class Order < ActiveRecord::Base
       shipment.update_attributes(:state => 'shipped', :shipped_at => Time.now)
     end
   end
+  
+  def make_shipments_ready
+    shipments.each(&:ready)
+  end
+  
+  def make_shipments_pending
+    shipments.each(&:pend)
+  end
+  
+  
 
 
   def allow_cancel?
@@ -164,7 +176,7 @@ class Order < ActiveRecord::Base
 
   # convenience method since many stores will not allow user to create multiple shipments
   def shipment
-    shipments.last
+    @shipment ||= shipments.last
   end
 
   def contains?(variant)
@@ -190,7 +202,7 @@ class Order < ActiveRecord::Base
 
   def shipping_methods
     return [] unless ship_address and ShippingMethod.count > 0
-    ShippingMethod.all.select { |method| method.zone.include?(ship_address) && method.available?(self) }
+    ShippingMethod.all_available_to_address(ship_address)
   end
 
   def payment_total
@@ -250,6 +262,11 @@ class Order < ActiveRecord::Base
     self.adjustments.each(&:update_amount)
     update_totals(:force_adjustment_update)
     self
+  end       
+  
+  def name
+    address = bill_address || ship_address
+    "#{address.firstname} #{address.lastname}" if address
   end
 
   private
@@ -263,6 +280,7 @@ class Order < ActiveRecord::Base
     end
     begin
       InventoryUnit.sell_units(self)
+      shipment.inventory_units = inventory_units
       save!
     rescue Exception => e
       logger.error "Problem saving authorized order: #{e.message}"
@@ -291,8 +309,12 @@ class Order < ActiveRecord::Base
     self.token = Authlogic::Random.friendly_token
   end
 
-  def create_checkout_and_shippment
-    self.shipments << Shipment.create(:order => self)
+  def create_checkout
     self.checkout ||= Checkout.create(:order => self)
   end
+
+  def create_shipment
+    self.shipments << Shipment.create(:order => self)
+  end
+
 end

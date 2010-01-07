@@ -57,12 +57,19 @@ class OrderTest < ActiveSupport::TestCase
 
       should "create shipment" do
         assert(@order.shipments.first, "Shipment was not created")
+        assert_equal 'pending', @order.shipments.first.state
       end
 
       should "update checkout completed_at" do
         assert(@order.checkout.completed_at, "Checkout#completed_at was not updated")
       end
-
+      
+      should "create inventory units" do
+        total_quantity = @order.line_items.map(&:quantity).sum
+        assert_equal total_quantity, @order.inventory_units.count
+        assert_equal total_quantity, @order.shipment.inventory_units.count
+      end
+      
       context "with empty stock" do
         setup do
           line_item = @order.line_items.first
@@ -77,11 +84,28 @@ class OrderTest < ActiveSupport::TestCase
       end
     end
     
+    context "pay!" do
+      should "make all shipments ready" do
+        @order.complete!
+        @order.pay!
+        assert @order.shipments.all?(&:ready_to_ship?), "shipments didn't all have state ready_to_ship"
+      end
+    end
+
     context "ship!" do
       should "make all shipments shipped" do
         @order.update_attribute(:state, 'paid')
         @order.ship!
-        assert @order.shipments.all?(&:shipped?)
+        assert @order.shipments.all?(&:shipped?), "shipments didn't all have state shipped"
+      end
+    end
+
+    context "under_paid!" do
+      should "make all shipments pending" do
+        @order.complete!
+        @order.pay!
+        @order.under_paid!
+        assert @order.shipments.all?(&:pending?), "shipments didn't all have state pending"
       end
     end
     
